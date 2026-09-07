@@ -72,6 +72,18 @@ const brl = (n) =>
 const brlCents = (n) =>
   n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 2 });
 
+const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
+const mesAno = (iso) => {
+  if (!iso) return null;
+  const [ano, mes] = iso.split("-");
+  return `${MESES[Number(mes) - 1]}/${ano}`;
+};
+const dataBr = (iso) => {
+  if (!iso) return null;
+  const [ano, mes, dia] = iso.split("-");
+  return `${dia}/${mes}/${ano}`;
+};
+
 function computeScores(funds, weights) {
   const w = weights || DEFAULT_WEIGHTS;
   const total = w.dy + w.pvp + w.liq + w.risco || 1;
@@ -160,7 +172,19 @@ async function buscarDadosSupabase(cfg) {
     }));
   const datas = rows.map((r) => r.atualizado_em).filter(Boolean).sort();
   const ultimaAtualizacao = datas.length ? new Date(datas[datas.length - 1]) : new Date();
-  return { fundos, ultimaAtualizacao };
+
+  // Mês de referência típico do informe da CVM (o que mais se repete entre os fundos)
+  // e o pregão mais recente usado nos preços da B3 — para deixar claro que DY/P-VP
+  // não são "ao vivo": seguem o calendário de divulgação da própria CVM.
+  const contagem = {};
+  for (const r of rows) {
+    if (r.data_informe) contagem[r.data_informe] = (contagem[r.data_informe] || 0) + 1;
+  }
+  const dataInformeTipica = Object.entries(contagem).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  const datasPreco = rows.map((r) => r.data_preco).filter(Boolean).sort();
+  const dataPrecoRecente = datasPreco.length ? datasPreco[datasPreco.length - 1] : null;
+
+  return { fundos, ultimaAtualizacao, dataInformeTipica, dataPrecoRecente };
 }
 
 const labelStyle = {
@@ -226,6 +250,8 @@ export default function FiiScreenerSimulador({ supabase } = {}) {
   const [statusBusca, setStatusBusca] = useState("idle");
   const [erroBusca, setErroBusca] = useState(null);
   const [atualizadoEm, setAtualizadoEm] = useState(null);
+  const [dataInformeTipica, setDataInformeTipica] = useState(null);
+  const [dataPrecoRecente, setDataPrecoRecente] = useState(null);
   const [pesos, setPesos] = useState(DEFAULT_WEIGHTS);
   const [escolhas, setEscolhas] = useState({});
 
@@ -235,11 +261,14 @@ export default function FiiScreenerSimulador({ supabase } = {}) {
     setStatusBusca("carregando");
     setErroBusca(null);
     try {
-      const { fundos, ultimaAtualizacao } = await buscarDadosSupabase(cfg);
+      const { fundos, ultimaAtualizacao, dataInformeTipica: infoRef, dataPrecoRecente: precoRef } =
+        await buscarDadosSupabase(cfg);
       setFundosReais(fundos);
       setFonte("real");
       setEscolhas({});
       setAtualizadoEm(ultimaAtualizacao);
+      setDataInformeTipica(infoRef);
+      setDataPrecoRecente(precoRef);
       setStatusBusca("ok");
     } catch (e) {
       setErroBusca(e.message || "Falha ao carregar dados reais");
@@ -428,12 +457,27 @@ export default function FiiScreenerSimulador({ supabase } = {}) {
                 : "Carregar dados reais (Supabase)"}
             </button>
           </div>
-          {fonte === "real" && atualizadoEm && (
-            <p style={{ margin: 0, fontSize: 12, color: TOKENS.inkSoft }}>
-              Atualizado {atualizadoEm.toLocaleString("pt-BR")}
-            </p>
-          )}
         </section>
+
+        {fonte === "real" && atualizadoEm && (
+          <div
+            style={{
+              borderLeft: `3px solid ${TOKENS.forest}`,
+              background: TOKENS.paperSoft,
+              padding: "10px 14px",
+              fontSize: 12.5,
+              color: TOKENS.ink,
+              marginBottom: 20,
+              lineHeight: 1.6,
+            }}
+          >
+            <strong>De onde vêm estes números:</strong> dividend yield, P/VP e risco seguem o{" "}
+            <strong>informe mensal da CVM de {mesAno(dataInformeTipica) || "—"}</strong> (é o mês mais
+            recente que os fundos haviam divulgado até agora — a CVM libera com atraso de 1 a 2 meses).
+            Preço e liquidez são do <strong>pregão de {dataBr(dataPrecoRecente) || "—"} (B3)</strong>.
+            Carregado no navegador em {atualizadoEm.toLocaleString("pt-BR")}.
+          </div>
+        )}
 
         {statusBusca === "erro" && (
           <div style={{ border: `1px solid ${TOKENS.brick}`, background: TOKENS.paperSoft, color: TOKENS.brickDark, padding: "10px 14px", fontSize: 13, marginBottom: 20 }}>
