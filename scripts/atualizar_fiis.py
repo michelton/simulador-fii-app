@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import sys
+import time
 import unicodedata
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -61,11 +62,20 @@ COTAHIST_LAYOUT = {
 
 # --------------------------------------------------------------------------- utilidades
 
-def baixar(url: str, timeout: int = 300) -> bytes:
-    log.info("Baixando %s", url)
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": "simulador-fii/1.0"})
-    r.raise_for_status()
-    return r.content
+def baixar(url: str, timeout: int = 300, tentativas: int = 3) -> bytes:
+    """Download com novas tentativas: os servidores da B3/CVM derrubam conexoes longas as vezes."""
+    ultimo_erro = None
+    for n in range(1, tentativas + 1):
+        log.info("Baixando %s (tentativa %d/%d)", url, n, tentativas)
+        try:
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": "simulador-fii/1.0"})
+            r.raise_for_status()
+            return r.content
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+            ultimo_erro = e
+            log.warning("Falha na tentativa %d: %s", n, e)
+            time.sleep(10 * n)
+    raise RuntimeError(f"Download falhou apos {tentativas} tentativas: {url}") from ultimo_erro
 
 
 def ler_csvs_do_zip(conteudo: bytes, contem: str) -> pd.DataFrame:
