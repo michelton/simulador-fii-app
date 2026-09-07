@@ -230,27 +230,38 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame, ativo: pd.DataFrame | 
     k_vp = coluna(compl, "Valor_Patrimonial_Cotas", "Valor_Patrimonial_Cota", "Valor_Patrimonial_Cotas_Classe", "VL_PATRIM_COTA")
     k_dy = coluna(compl, "Percentual_Dividend_Yield_Mes", "Dividend_Yield_Mes", obrigatoria=False)
     k_pl = coluna(compl, "Patrimonio_Liquido", "VL_PATRIM_LIQ", obrigatoria=False)
-    # Composicao da carteira (CRI, cotas de FII) vive no arquivo ativo_passivo,
-    # nao no complemento. Se existir, traz as duas colunas para dentro de compl.
-    k_cri = k_fii = None
+    # Composicao da carteira vive no arquivo ativo_passivo (nao no complemento).
+    # Agrega em quatro blocos: papel (CRI/LCI/LIG), cotas de FII, tijolo e desenvolvimento.
+    GRUPOS = {
+        "comp_papel": ["CRI", "CRI_CRA", "LCI", "LCI_LCA", "LIG", "Letras_Hipotecarias"],
+        "comp_fii": ["FII"],
+        "comp_tijolo": ["Imoveis_Renda_Acabados", "Imoveis_Renda_Construcao", "Terrenos",
+                        "Imoveis_Venda_Acabados", "Imoveis_Venda_Construcao", "Outros_Direitos_Reais"],
+        "comp_dev": ["Imoveis_Renda_Construcao", "Imoveis_Venda_Construcao", "Imoveis_Venda_Acabados", "Terrenos"],
+        "comp_total": ["Total_Investido"],
+    }
     if ativo is not None:
         a_cnpj = coluna(ativo, "CNPJ_Fundo_Classe", "CNPJ_Fundo", obrigatoria=False)
         a_data = coluna(ativo, "Data_Referencia", obrigatoria=False)
-        a_cri = coluna(ativo, "CRI", "Valor_CRI", "Certificados_Recebiveis_Imobiliarios", obrigatoria=False)
-        a_fii = coluna(ativo, "FII", "Valor_FII", "Cotas_FII", "Fundos_Investimento_Imobiliario", obrigatoria=False)
-        log.info("Colunas do ativo_passivo: %s", list(ativo.columns))
-        if a_cnpj and a_data and (a_cri or a_fii):
-            sub = ativo[[a_cnpj, a_data] + [c for c in (a_cri, a_fii) if c]].copy()
-            sub = sub.rename(columns={a_cnpj: "CNPJ_Fundo_Classe", a_data: "Data_Referencia"})
-            if a_cri: sub = sub.rename(columns={a_cri: "CRI"})
-            if a_fii: sub = sub.rename(columns={a_fii: "FII"})
+        if a_cnpj and a_data:
+            sub = pd.DataFrame({
+                "CNPJ_Fundo_Classe": ativo[a_cnpj],
+                "Data_Referencia": ativo[a_data],
+            })
+            for grupo, cols in GRUPOS.items():
+                presentes = [coluna(ativo, c, obrigatoria=False) for c in cols]
+                presentes = [c for c in presentes if c]
+                sub[grupo] = sum((numero(ativo[c]).fillna(0) for c in presentes), start=pd.Series(0.0, index=ativo.index))
+            log.info("Composicao lida do ativo_passivo: %s", {g: len([c for c in cols if coluna(ativo, c, obrigatoria=False)]) for g, cols in GRUPOS.items()})
             compl = compl.merge(sub, left_on=[k_cnpj, k_data], right_on=["CNPJ_Fundo_Classe", "Data_Referencia"],
                                 how="left", suffixes=("", "_ap"))
-            k_cri = "CRI" if a_cri else None
-            k_fii = "FII" if a_fii else None
-    # fallback: alguns arquivos (e os fixtures de teste) trazem CRI/FII no proprio complemento
-    k_cri = k_cri or coluna(compl, "CRI", obrigatoria=False)
-    k_fii = k_fii or coluna(compl, "FII", obrigatoria=False)
+    # fallback (fixtures de teste): CRI/FII direto no complemento
+    for grupo, alt in (("comp_papel", "CRI"), ("comp_fii", "FII")):
+        if grupo not in compl.columns and coluna(compl, alt, obrigatoria=False):
+            compl[grupo] = numero(compl[coluna(compl, alt)])
+    for grupo in GRUPOS:
+        if grupo not in compl.columns:
+            compl[grupo] = 0.0
 
     c = compl.copy()
     c["data"] = pd.to_datetime(c[k_data], errors="coerce")
@@ -259,11 +270,10 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame, ativo: pd.DataFrame | 
     # Administradores preenchem o DY mensal em unidades diferentes: fração (0,011)
     # ou percentual (1,1). Abaixo de 0,05 só faz sentido como fração -> converte.
     c["dy_mes"] = c["dy_mes"].where(c["dy_mes"] >= 0.05, c["dy_mes"] * 100)
-    if not k_cri or not k_fii:
-        log.warning("Colunas CRI/FII não encontradas no complemento. Disponíveis: %s", list(compl.columns))
     c["pl"] = numero(c[k_pl]) if k_pl else float("nan")
-    c["cri"] = numero(c[k_cri]) if k_cri else 0.0
-    c["fii"] = numero(c[k_fii]) if k_fii else 0.0
+    base = c["comp_total"].where(c["comp_total"] > 0, c["pl"])
+    for grupo in ("comp_papel", "comp_fii", "comp_tijolo", "comp_dev"):
+        c[grupo.replace("comp_", "frac_")] = (c[grupo] / base).where(base > 0, 0.0).fillna(0.0)
     c = c.sort_values("data")
 
     ultimo = c.groupby(k_cnpj).tail(1).set_index(k_cnpj)
@@ -272,28 +282,36 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame, ativo: pd.DataFrame | 
     meses = c[c["data"] > corte].groupby(k_cnpj)["dy_mes"].count().rename("meses_dy")
 
     out = g[["nome", "isin", "segmento_cvm", "mandato"]].join(
-        ultimo[["vp", "pl", "cri", "fii", "data"]].rename(columns={"data": "data_informe"}), how="inner"
+        ultimo[["vp", "pl", "frac_papel", "frac_fii", "frac_tijolo", "frac_dev", "data"]].rename(columns={"data": "data_informe"}), how="inner"
     ).join(dy12).join(meses)
     return out
 
 
 def classificar(row) -> str:
+    """Classifica pela composicao real da carteira (a CVM raramente preenche mandato/segmento)."""
     seg = sem_acento(row.get("segmento_cvm", ""))
     mand = sem_acento(row.get("mandato", ""))
-    pl = row.get("pl") or 0
-    frac_cri = (row.get("cri") or 0) / pl if pl else 0
-    frac_fii = (row.get("fii") or 0) / pl if pl else 0
-    if "desenvolv" in mand:
-        return "DESENVOLVIMENTO"
+    papel = float(row.get("frac_papel") or 0)
+    fof = float(row.get("frac_fii") or 0)
+    tijolo = float(row.get("frac_tijolo") or 0)
+    dev = float(row.get("frac_dev") or 0)
     if "hotel" in seg:
         return "HOTELARIAS"
-    if frac_fii >= 0.5:
+    if "desenvolv" in mand or dev >= 0.30:
+        return "DESENVOLVIMENTO"
+    if fof >= 0.50:
         return "FOFs"
-    if frac_cri >= 0.5 or "titulo" in seg or "titulo" in mand:
+    if papel >= 0.25 and tijolo >= 0.25:
+        return "HÍBRIDOS"
+    if papel >= 0.50 or "titulo" in mand:
         return "PAPEL"
+    if tijolo >= 0.40:
+        return "TIJOLO"
     if "hibrido" in seg or "hibrido" in mand:
         return "HÍBRIDOS"
-    return "TIJOLO"
+    # sem maioria clara: vai para o bloco dominante
+    maior = max(("PAPEL", papel), ("FOFs", fof), ("TIJOLO", tijolo), key=lambda x: x[1])
+    return maior[0] if maior[1] > 0 else "TIJOLO"
 
 
 # --------------------------------------------------------------------------- CVM trimestral (risco, opcional)
@@ -312,9 +330,16 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
                 conteudo = baixar(CVM_TRIMESTRAL.format(ano=ano))
             with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
                 log.info("Arquivos no informe trimestral %s: %s", ano, z.namelist())
-            df_tri = ler_csvs_do_zip(conteudo, "imovel_desempenho")
-            log.info("Colunas do imovel_desempenho: %s", list(df_tri.columns))
-            partes.append(df_tri)
+            for tag in (f"fii_imovel_{ano}", "trimestral_fii_complemento", "imovel_renda_acabado_inquilino"):
+                try:
+                    df_tri = ler_csvs_do_zip(conteudo, tag)
+                except FileNotFoundError:
+                    continue
+                log.info("Colunas de %s: %s", tag, list(df_tri.columns)[:45])
+                if coluna(df_tri, "Percentual_Vacancia", "Percentual_Vacancia_Fisica", "Vacancia_Fisica",
+                          "Percentual_Vacancia_Financeira", "Vacancia", "Area_Vaga", obrigatoria=False):
+                    partes.append(df_tri)
+                    break
         except Exception as e:  # noqa: BLE001 - opcional por desenho
             log.warning("Informe trimestral %s não utilizado (%s)", ano, e)
     if not partes:
@@ -324,7 +349,7 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
         c_cnpj = coluna(df, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
         c_data = coluna(df, "Data_Referencia", "DT_REFER")
         c_vac = coluna(df, "Percentual_Vacancia", "Percentual_Vacancia_Fisica", "Vacancia_Fisica",
-                       "Percentual_Vacancia_Financeira", "Vacancia")
+                       "Percentual_Vacancia_Financeira", "Vacancia", "Area_Vaga")
     except KeyError as e:
         log.warning("Colunas de vacância não encontradas: %s", e)
         return None
