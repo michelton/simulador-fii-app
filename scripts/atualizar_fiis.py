@@ -413,8 +413,12 @@ def montar_tabela(b3: pd.DataFrame, cvm: pd.DataFrame, risco: pd.Series | None,
 # --------------------------------------------------------------------------- Supabase
 
 def gravar_supabase(df: pd.DataFrame, url: str, chave: str) -> None:
+    envio = df.copy()
+    envio["data_informe"] = pd.to_datetime(envio["data_informe"]).dt.strftime("%Y-%m-%d")
+    envio["data_preco"] = pd.to_datetime(envio["data_preco"]).dt.strftime("%Y-%m-%d")
     linhas = json.loads(
-        df[["ticker", "nome", "segmento", "dy", "pvp", "liquidez", "risco", "risco_tipo", "atualizado_em"]]
+        envio[["ticker", "nome", "segmento", "dy", "pvp", "liquidez", "risco", "risco_tipo",
+               "atualizado_em", "data_informe", "data_preco"]]
         .to_json(orient="records", force_ascii=False)
     )
     cab = {
