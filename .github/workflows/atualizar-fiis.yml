@@ -1,0 +1,30 @@
+name: Atualizar dados de FIIs (CVM + B3 -> Supabase)
+
+on:
+  schedule:
+    # 09:00 UTC = 06:00 em Brasilia, todo dia (a B3 publica o COTAHIST do dia anterior a noite)
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - run: pip install -r scripts/requirements.txt
+
+      - name: Coletar, calcular e gravar no Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TICKERS: ${{ vars.TICKERS }}
+          MIN_LIQUIDEZ: ${{ vars.MIN_LIQUIDEZ }}
+        run: python scripts/atualizar_fiis.py
