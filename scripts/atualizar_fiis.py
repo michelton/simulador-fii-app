@@ -171,8 +171,8 @@ def resumir_b3(cot: pd.DataFrame, janela_dias: int = 30) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- CVM mensal
 
-def carregar_cvm_mensal(anos: list[int], fixtures: Path | None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    gerais, compls = [], []
+def carregar_cvm_mensal(anos: list[int], fixtures: Path | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+    gerais, compls, ativos = [], [], []
     for ano in anos:
         if fixtures:
             caminho = fixtures / f"inf_mensal_fii_{ano}.zip"
@@ -187,12 +187,17 @@ def carregar_cvm_mensal(anos: list[int], fixtures: Path | None) -> tuple[pd.Data
                 continue
         gerais.append(ler_csvs_do_zip(conteudo, "geral"))
         compls.append(ler_csvs_do_zip(conteudo, "complemento"))
+        try:
+            ativos.append(ler_csvs_do_zip(conteudo, "ativo_passivo"))
+        except FileNotFoundError:
+            pass
     if not gerais:
         raise RuntimeError("Nenhum informe mensal da CVM carregado")
-    return pd.concat(gerais, ignore_index=True), pd.concat(compls, ignore_index=True)
+    ativo = pd.concat(ativos, ignore_index=True) if ativos else None
+    return pd.concat(gerais, ignore_index=True), pd.concat(compls, ignore_index=True), ativo
 
 
-def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
+def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame, ativo: pd.DataFrame | None = None) -> pd.DataFrame:
     c_cnpj = coluna(geral, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
     c_data = coluna(geral, "Data_Referencia", "DT_REFER")
     c_nome = coluna(geral, "Nome_Fundo_Classe", "Nome_Fundo", "DENOM_SOCIAL")
@@ -207,14 +212,35 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
     g["isin"] = g[c_isin].str.strip() if c_isin else None
     g["segmento_cvm"] = g[c_seg].fillna("") if c_seg else ""
     g["mandato"] = g[c_mand].fillna("") if c_mand else ""
+    log.info("Segmento_Atuacao (top 12): %s", g["segmento_cvm"].value_counts().head(12).to_dict())
+    log.info("Mandato (top 8): %s", g["mandato"].value_counts().head(8).to_dict())
 
     k_cnpj = coluna(compl, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
     k_data = coluna(compl, "Data_Referencia", "DT_REFER")
     k_vp = coluna(compl, "Valor_Patrimonial_Cotas", "Valor_Patrimonial_Cota", "Valor_Patrimonial_Cotas_Classe", "VL_PATRIM_COTA")
     k_dy = coluna(compl, "Percentual_Dividend_Yield_Mes", "Dividend_Yield_Mes", obrigatoria=False)
     k_pl = coluna(compl, "Patrimonio_Liquido", "VL_PATRIM_LIQ", obrigatoria=False)
-    k_cri = coluna(compl, "CRI", obrigatoria=False)
-    k_fii = coluna(compl, "FII", obrigatoria=False)
+    # Composicao da carteira (CRI, cotas de FII) vive no arquivo ativo_passivo,
+    # nao no complemento. Se existir, traz as duas colunas para dentro de compl.
+    k_cri = k_fii = None
+    if ativo is not None:
+        a_cnpj = coluna(ativo, "CNPJ_Fundo_Classe", "CNPJ_Fundo", obrigatoria=False)
+        a_data = coluna(ativo, "Data_Referencia", obrigatoria=False)
+        a_cri = coluna(ativo, "CRI", "Valor_CRI", "Certificados_Recebiveis_Imobiliarios", obrigatoria=False)
+        a_fii = coluna(ativo, "FII", "Valor_FII", "Cotas_FII", "Fundos_Investimento_Imobiliario", obrigatoria=False)
+        log.info("Colunas do ativo_passivo: %s", list(ativo.columns))
+        if a_cnpj and a_data and (a_cri or a_fii):
+            sub = ativo[[a_cnpj, a_data] + [c for c in (a_cri, a_fii) if c]].copy()
+            sub = sub.rename(columns={a_cnpj: "CNPJ_Fundo_Classe", a_data: "Data_Referencia"})
+            if a_cri: sub = sub.rename(columns={a_cri: "CRI"})
+            if a_fii: sub = sub.rename(columns={a_fii: "FII"})
+            compl = compl.merge(sub, left_on=[k_cnpj, k_data], right_on=["CNPJ_Fundo_Classe", "Data_Referencia"],
+                                how="left", suffixes=("", "_ap"))
+            k_cri = "CRI" if a_cri else None
+            k_fii = "FII" if a_fii else None
+    # fallback: alguns arquivos (e os fixtures de teste) trazem CRI/FII no proprio complemento
+    k_cri = k_cri or coluna(compl, "CRI", obrigatoria=False)
+    k_fii = k_fii or coluna(compl, "FII", obrigatoria=False)
 
     c = compl.copy()
     c["data"] = pd.to_datetime(c[k_data], errors="coerce")
@@ -276,7 +302,9 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
                 conteudo = baixar(CVM_TRIMESTRAL.format(ano=ano))
             with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
                 log.info("Arquivos no informe trimestral %s: %s", ano, z.namelist())
-            partes.append(ler_csvs_do_zip(conteudo, "imovel_renda_acabado"))
+            df_tri = ler_csvs_do_zip(conteudo, "imovel_desempenho")
+            log.info("Colunas do imovel_desempenho: %s", list(df_tri.columns))
+            partes.append(df_tri)
         except Exception as e:  # noqa: BLE001 - opcional por desenho
             log.warning("Informe trimestral %s não utilizado (%s)", ano, e)
     if not partes:
@@ -285,7 +313,8 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
     try:
         c_cnpj = coluna(df, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
         c_data = coluna(df, "Data_Referencia", "DT_REFER")
-        c_vac = coluna(df, "Percentual_Vacancia", "Vacancia", "Percentual_Vacancia_Fisica")
+        c_vac = coluna(df, "Percentual_Vacancia", "Percentual_Vacancia_Fisica", "Vacancia_Fisica",
+                       "Percentual_Vacancia_Financeira", "Vacancia")
     except KeyError as e:
         log.warning("Colunas de vacância não encontradas: %s", e)
         return None
@@ -390,8 +419,8 @@ def main() -> int:
 
     try:
         b3 = resumir_b3(carregar_b3(anos, args.fixtures))
-        geral, compl = carregar_cvm_mensal(anos, args.fixtures)
-        cvm = resumir_cvm(geral, compl)
+        geral, compl, ativo = carregar_cvm_mensal(anos, args.fixtures)
+        cvm = resumir_cvm(geral, compl, ativo)
         risco = carregar_risco(anos, args.fixtures)
         tabela = montar_tabela(b3, cvm, risco, tickers, min_liq)
     except Exception as e:  # noqa: BLE001
