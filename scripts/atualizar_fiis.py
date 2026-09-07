@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import sys
+import unicodedata
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -73,8 +74,12 @@ def ler_csvs_do_zip(conteudo: bytes, contem: str) -> pd.DataFrame:
     with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
         for nome in z.namelist():
             if contem in nome.lower() and nome.lower().endswith(".csv"):
-                with z.open(nome) as fh:
-                    partes.append(pd.read_csv(fh, sep=";", encoding="latin-1", dtype=str))
+                bruto = z.read(nome)
+                try:
+                    texto = bruto.decode("utf-8")
+                except UnicodeDecodeError:
+                    texto = bruto.decode("latin-1")
+                partes.append(pd.read_csv(io.StringIO(texto), sep=";", dtype=str))
     if not partes:
         raise FileNotFoundError(f"Nenhum CSV com '{contem}' no zip")
     return pd.concat(partes, ignore_index=True)
@@ -89,6 +94,12 @@ def coluna(df: pd.DataFrame, *candidatas: str, obrigatoria: bool = True) -> str 
     if obrigatoria:
         raise KeyError(f"Coluna não encontrada. Candidatas: {candidatas}. Disponíveis: {list(df.columns)[:40]}")
     return None
+
+
+def sem_acento(txt) -> str:
+    """minúsculas e sem acentos, para comparar rótulos da CVM com segurança."""
+    txt = "" if txt is None else str(txt)
+    return unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode().lower()
 
 
 def numero(serie: pd.Series) -> pd.Series:
@@ -209,6 +220,11 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
     c["data"] = pd.to_datetime(c[k_data], errors="coerce")
     c["vp"] = numero(c[k_vp])
     c["dy_mes"] = numero(c[k_dy]) if k_dy else float("nan")
+    # Administradores preenchem o DY mensal em unidades diferentes: fração (0,011)
+    # ou percentual (1,1). Abaixo de 0,05 só faz sentido como fração -> converte.
+    c["dy_mes"] = c["dy_mes"].where(c["dy_mes"] >= 0.05, c["dy_mes"] * 100)
+    if not k_cri or not k_fii:
+        log.warning("Colunas CRI/FII não encontradas no complemento. Disponíveis: %s", list(compl.columns))
     c["pl"] = numero(c[k_pl]) if k_pl else float("nan")
     c["cri"] = numero(c[k_cri]) if k_cri else 0.0
     c["fii"] = numero(c[k_fii]) if k_fii else 0.0
@@ -226,8 +242,8 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
 
 
 def classificar(row) -> str:
-    seg = str(row.get("segmento_cvm", "")).lower()
-    mand = str(row.get("mandato", "")).lower()
+    seg = sem_acento(row.get("segmento_cvm", ""))
+    mand = sem_acento(row.get("mandato", ""))
     pl = row.get("pl") or 0
     frac_cri = (row.get("cri") or 0) / pl if pl else 0
     frac_fii = (row.get("fii") or 0) / pl if pl else 0
@@ -237,9 +253,9 @@ def classificar(row) -> str:
         return "HOTELARIAS"
     if frac_fii >= 0.5:
         return "FOFs"
-    if frac_cri >= 0.5 or "título" in seg or "titulo" in seg or "títulos" in mand or "titulos" in mand:
+    if frac_cri >= 0.5 or "titulo" in seg or "titulo" in mand:
         return "PAPEL"
-    if "híbrido" in seg or "hibrido" in seg or "híbrido" in mand or "hibrido" in mand:
+    if "hibrido" in seg or "hibrido" in mand:
         return "HÍBRIDOS"
     return "TIJOLO"
 
@@ -258,6 +274,8 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
                 conteudo = caminho.read_bytes()
             else:
                 conteudo = baixar(CVM_TRIMESTRAL.format(ano=ano))
+            with zipfile.ZipFile(io.BytesIO(conteudo)) as z:
+                log.info("Arquivos no informe trimestral %s: %s", ano, z.namelist())
             partes.append(ler_csvs_do_zip(conteudo, "imovel_renda_acabado"))
         except Exception as e:  # noqa: BLE001 - opcional por desenho
             log.warning("Informe trimestral %s não utilizado (%s)", ano, e)
@@ -304,6 +322,13 @@ def montar_tabela(b3: pd.DataFrame, cvm: pd.DataFrame, risco: pd.Series | None,
     df.loc[df["segmento"].isin(["PAPEL", "FOFs"]), "risco"] = None
 
     df = df[df["dy"].notna() & df["pvp"].notna() & (df["vp"] > 0) & (df["preco"] > 0)]
+    # descarta o que é erro de dado, não fundo: DY 12m impossível, P/VP absurdo, preço velho
+    antes = len(df)
+    df = df[(df["dy"] > 0) & (df["dy"] <= 40) & (df["pvp"] >= 0.2) & (df["pvp"] <= 3.0)]
+    limite = df["data_preco"].max() - pd.Timedelta(days=20)
+    df = df[df["data_preco"] >= limite]
+    df = df.sort_values("data_informe").drop_duplicates("ticker", keep="last")
+    log.info("Filtros de sanidade removeram %d fundos", antes - len(df))
     if tickers:
         df = df[df["ticker"].isin(tickers)]
     if min_liq:
@@ -327,7 +352,9 @@ def gravar_supabase(df: pd.DataFrame, url: str, chave: str) -> None:
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=minimal",
     }
-    r = requests.post(f"{url.rstrip('/')}/rest/v1/funds?on_conflict=ticker", headers=cab, json=linhas, timeout=60)
+    r = requests.post(f"{url.rstrip('/')}/rest/v1/funds?on_conflict=ticker", headers=cab, json=linhas, timeout=120)
+    if not r.ok:
+        log.error("Supabase respondeu %s: %s", r.status_code, r.text[:800])
     r.raise_for_status()
     log.info("Upsert de %d fundos concluído", len(linhas))
 
