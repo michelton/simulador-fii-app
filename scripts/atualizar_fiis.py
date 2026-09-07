@@ -355,8 +355,15 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
         return None
     df["data"] = pd.to_datetime(df[c_data], errors="coerce")
     df["vac"] = numero(df[c_vac])
+    c_area = coluna(df, "Area", "Area_Total", obrigatoria=False)
+    df["peso"] = numero(df[c_area]).fillna(0) if c_area else 0.0
     ultima = df.groupby(c_cnpj)["data"].transform("max")
-    return df[df["data"] == ultima].groupby(c_cnpj)["vac"].mean().rename("risco")
+    ult = df[(df["data"] == ultima) & df["vac"].notna()].copy()
+    # vacancia ponderada pela area do imovel; sem area, cai na media simples
+    ult["vac_x_peso"] = ult["vac"] * ult["peso"]
+    agg = ult.groupby(c_cnpj).agg(vac_x_peso=("vac_x_peso", "sum"), peso=("peso", "sum"), media=("vac", "mean"))
+    risco = (agg["vac_x_peso"] / agg["peso"]).where(agg["peso"] > 0, agg["media"])
+    return risco.rename("risco")
 
 
 # --------------------------------------------------------------------------- montagem
