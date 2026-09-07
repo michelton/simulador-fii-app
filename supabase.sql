@@ -10,6 +10,8 @@ create table if not exists funds (
   liquidez numeric,
   risco numeric,            -- % do portfólio sem gerar renda (vacância, inadimplência ou em obra)
   risco_tipo text,          -- 'Vacância física', 'Inadimplência', 'Em obra'...
+  data_informe date,        -- mês de referência do informe da CVM (DY, P/VP, risco)
+  data_preco date,          -- data do último pregão usado (B3)
   atualizado_em timestamptz not null default now()
 );
 
