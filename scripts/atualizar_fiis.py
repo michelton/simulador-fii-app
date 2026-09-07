@@ -182,9 +182,9 @@ def carregar_cvm_mensal(anos: list[int], fixtures: Path | None) -> tuple[pd.Data
 
 
 def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
-    c_cnpj = coluna(geral, "CNPJ_Fundo", "CNPJ_FUNDO")
+    c_cnpj = coluna(geral, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
     c_data = coluna(geral, "Data_Referencia", "DT_REFER")
-    c_nome = coluna(geral, "Nome_Fundo", "DENOM_SOCIAL")
+    c_nome = coluna(geral, "Nome_Fundo_Classe", "Nome_Fundo", "DENOM_SOCIAL")
     c_isin = coluna(geral, "Codigo_ISIN", "Cod_ISIN", "ISIN", obrigatoria=False)
     c_seg = coluna(geral, "Segmento_Atuacao", obrigatoria=False)
     c_mand = coluna(geral, "Mandato", obrigatoria=False)
@@ -197,9 +197,9 @@ def resumir_cvm(geral: pd.DataFrame, compl: pd.DataFrame) -> pd.DataFrame:
     g["segmento_cvm"] = g[c_seg].fillna("") if c_seg else ""
     g["mandato"] = g[c_mand].fillna("") if c_mand else ""
 
-    k_cnpj = coluna(compl, "CNPJ_Fundo", "CNPJ_FUNDO")
+    k_cnpj = coluna(compl, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
     k_data = coluna(compl, "Data_Referencia", "DT_REFER")
-    k_vp = coluna(compl, "Valor_Patrimonial_Cotas", "Valor_Patrimonial_Cota", "VL_PATRIM_COTA")
+    k_vp = coluna(compl, "Valor_Patrimonial_Cotas", "Valor_Patrimonial_Cota", "Valor_Patrimonial_Cotas_Classe", "VL_PATRIM_COTA")
     k_dy = coluna(compl, "Percentual_Dividend_Yield_Mes", "Dividend_Yield_Mes", obrigatoria=False)
     k_pl = coluna(compl, "Patrimonio_Liquido", "VL_PATRIM_LIQ", obrigatoria=False)
     k_cri = coluna(compl, "CRI", obrigatoria=False)
@@ -265,7 +265,7 @@ def carregar_risco(anos: list[int], fixtures: Path | None) -> pd.Series | None:
         return None
     df = pd.concat(partes, ignore_index=True)
     try:
-        c_cnpj = coluna(df, "CNPJ_Fundo", "CNPJ_FUNDO")
+        c_cnpj = coluna(df, "CNPJ_Fundo_Classe", "CNPJ_Fundo", "CNPJ_FUNDO")
         c_data = coluna(df, "Data_Referencia", "DT_REFER")
         c_vac = coluna(df, "Percentual_Vacancia", "Vacancia", "Percentual_Vacancia_Fisica")
     except KeyError as e:
