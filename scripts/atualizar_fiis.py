@@ -428,6 +428,15 @@ def gravar_supabase(df: pd.DataFrame, url: str, chave: str) -> None:
         log.error("Supabase respondeu %s: %s", r.status_code, r.text[:800])
     r.raise_for_status()
     log.info("Upsert de %d fundos concluído", len(linhas))
+    # Remove o que NAO foi atualizado nesta rodada (fundos que sairam dos filtros ou deixaram
+    # de ser negociados). Sem isso, registros velhos se acumulariam para sempre.
+    corte = df["atualizado_em"].iloc[0]
+    d = requests.delete(f"{url.rstrip('/')}/rest/v1/funds?atualizado_em=lt.{corte}",
+                        headers={k: v for k, v in cab.items() if k != "Prefer"}, timeout=60)
+    if d.ok:
+        log.info("Registros antigos removidos (anteriores a %s)", corte)
+    else:
+        log.warning("Não consegui limpar registros antigos: %s %s", d.status_code, d.text[:300])
 
 
 def registrar_execucao(url: str, chave: str, status: str, detalhe: str) -> None:
